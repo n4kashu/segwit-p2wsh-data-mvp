@@ -57,6 +57,29 @@ function buildEnvelopeScript(dataBytes: Uint8Array): Buffer {
   ]);
 }
 
+function buildInscriptionScript(dataBytes: Uint8Array, contentType: string = "text/plain;charset=utf-8"): Buffer {
+  // Build Ordinals-style inscription envelope
+  // OP_FALSE OP_IF OP_PUSH "ord" OP_PUSH 1 OP_PUSH contentType OP_PUSH 0 OP_PUSH data OP_ENDIF
+  const parts: Array<number | Buffer> = [
+    bitcoin.opcodes.OP_FALSE,
+    bitcoin.opcodes.OP_IF,
+    Buffer.from("ord"),
+    Buffer.from([1]), // Protocol version
+    Buffer.from(contentType),
+    Buffer.from([0]), // Data push delimiter
+  ];
+
+  // Split data into chunks if needed (520 byte limit per push)
+  const MAX_CHUNK_SIZE = 520;
+  for (let i = 0; i < dataBytes.length; i += MAX_CHUNK_SIZE) {
+    parts.push(Buffer.from(dataBytes.slice(i, i + MAX_CHUNK_SIZE)));
+  }
+  
+  parts.push(bitcoin.opcodes.OP_ENDIF);
+  
+  return bitcoin.script.compile(parts);
+}
+
 
 function bytesToHex(u8: Uint8Array): string {
   return Array.from(u8)
@@ -94,6 +117,7 @@ function parseEnvelopeScript(scriptHex: string): { data: Uint8Array; isEnvelope:
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<"create" | "decode">("create");
+  const [createSubTab, setCreateSubTab] = useState<"segwit" | "taproot">("segwit");
   
   // Create tab states
   const [connected, setConnected] = useState(false);
@@ -117,6 +141,15 @@ export default function App() {
   const [broadcasting, setBroadcasting] = useState(false);
   const [message, setMessage] = useState<string>("");
   const [expandedHex, setExpandedHex] = useState<boolean>(false);
+  
+  // Taproot states
+  const [taprootAddress, setTaprootAddress] = useState<string>("");
+  const [taprootScriptHex, setTaprootScriptHex] = useState<string>("");
+  const [taprootScriptLen, setTaprootScriptLen] = useState<number>(0);
+  const [taprootDataInput, setTaprootDataInput] = useState<string>("Hello from Taproot!");
+  const [taprootMode, setTaprootMode] = useState<"utf8" | "hex">("utf8");
+  const [contentType, setContentType] = useState<string>("text/plain;charset=utf-8");
+  const [taprootExpandedHex, setTaprootExpandedHex] = useState<boolean>(false);
   
   // Decode tab states
   const [decodeTxid, setDecodeTxid] = useState<string>("");
@@ -167,6 +200,27 @@ export default function App() {
       }
     }
   }, [mode, dataInput]);
+
+  // Taproot inscription effect
+  useEffect(() => {
+    try {
+      const bytes = taprootMode === "utf8" ? utf8ToBytes(taprootDataInput) : hexToBytes(taprootDataInput);
+      const inscriptionScript = buildInscriptionScript(bytes, contentType);
+      setTaprootScriptHex(inscriptionScript.toString("hex"));
+      setTaprootScriptLen(inscriptionScript.length);
+      
+      // For demo purposes, we'll show the inscription script details
+      // In production, you'd need proper Taproot address generation with key pairs
+      // This requires additional libraries for EC operations
+      setTaprootAddress("[Taproot address generation requires EC library]");
+      
+    } catch (e: any) {
+      console.error("Error building taproot inscription:", e);
+      setTaprootScriptHex("");
+      setTaprootAddress("");
+      setTaprootScriptLen(0);
+    }
+  }, [taprootMode, taprootDataInput, contentType]);
 
   const connect = useCallback(async () => {
     try {
@@ -441,6 +495,33 @@ export default function App() {
         {/* Create Tab Content */}
         {activeTab === "create" && (
           <>
+            {/* Subtabs for SegWit vs Taproot */}
+            <div className="flex gap-2 mb-4">
+              <button
+                onClick={() => setCreateSubTab("segwit")}
+                className={`px-4 py-2 rounded-lg transition-colors ${
+                  createSubTab === "segwit" 
+                    ? "bg-indigo-600 text-white" 
+                    : "bg-slate-800 text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                SegWit P2WSH
+              </button>
+              <button
+                onClick={() => setCreateSubTab("taproot")}
+                className={`px-4 py-2 rounded-lg transition-colors ${
+                  createSubTab === "taproot" 
+                    ? "bg-indigo-600 text-white" 
+                    : "bg-slate-800 text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                Taproot Inscription
+              </button>
+            </div>
+
+            {/* SegWit Content */}
+            {createSubTab === "segwit" && (
+              <>
             <section className="bg-slate-900/60 p-4 rounded-2xl shadow">
               <h2 className="font-semibold mb-3">1) Enter data → build P2WSH witnessScript</h2>
               <div className="flex gap-3 mb-3">
@@ -623,6 +704,90 @@ export default function App() {
 
             {message && (
               <div className="p-3 rounded-xl bg-slate-800/80 border border-slate-700 text-sm">{message}</div>
+            )}
+              </>
+            )}
+
+            {/* Taproot Content */}
+            {createSubTab === "taproot" && (
+              <>
+                <section className="bg-slate-900/60 p-4 rounded-2xl shadow">
+                  <h2 className="font-semibold mb-3">1) Enter inscription data → build Taproot script</h2>
+                  <div className="flex gap-3 mb-3">
+                    <label className="flex items-center gap-2">
+                      <input type="radio" checked={taprootMode === "utf8"} onChange={() => setTaprootMode("utf8")} />
+                      <span>UTF‑8</span>
+                    </label>
+                    <label className="flex items-center gap-2">
+                      <input type="radio" checked={taprootMode === "hex"} onChange={() => setTaprootMode("hex")} />
+                      <span>Hex</span>
+                    </label>
+                  </div>
+                  <div className="mb-3">
+                    <label className="block text-sm opacity-80 mb-1">Content Type (MIME)</label>
+                    <input
+                      className="w-full rounded-xl p-2 text-slate-900"
+                      value={contentType}
+                      onChange={(e) => setContentType(e.target.value)}
+                      placeholder="text/plain;charset=utf-8"
+                    />
+                  </div>
+                  <textarea
+                    className="w-full min-h-[100px] rounded-xl p-3 text-slate-900"
+                    value={taprootDataInput}
+                    onChange={(e) => setTaprootDataInput(e.target.value)}
+                    placeholder={taprootMode === "utf8" ? "Type some text…" : "deadbeef…"}
+                  />
+                  <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+                    <div className="space-y-2">
+                      <div className="bg-slate-800/70 rounded-xl p-3">
+                        <div className="opacity-70">Inscription size</div>
+                        <div>{taprootScriptLen} bytes</div>
+                      </div>
+                      <div className="bg-slate-800/70 rounded-xl p-3 break-all">
+                        <div className="opacity-70">Taproot address (testnet)</div>
+                        <div>{taprootAddress || "—"}</div>
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <div className="bg-slate-800/70 rounded-xl p-3 break-all">
+                        <div className="flex justify-between items-center mb-1">
+                          <div className="opacity-70">Inscription script (hex)</div>
+                          {taprootScriptHex && taprootScriptHex.length > 100 && (
+                            <button 
+                              onClick={() => setTaprootExpandedHex(!taprootExpandedHex)}
+                              className="text-xs text-indigo-400 hover:text-indigo-300"
+                            >
+                              {taprootExpandedHex ? "Collapse" : "Expand"}
+                            </button>
+                          )}
+                        </div>
+                        <div className="text-xs font-mono">
+                          {taprootScriptHex ? (
+                            taprootExpandedHex || taprootScriptHex.length <= 100 
+                              ? taprootScriptHex 
+                              : `${taprootScriptHex.slice(0, 100)}...`
+                          ) : "—"}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="bg-slate-900/60 p-4 rounded-2xl shadow text-sm space-y-2">
+                  <h3 className="font-semibold">Taproot Inscription Notes</h3>
+                  <ul className="list-disc ml-5 space-y-1">
+                    <li>Uses Ordinals-style inscription format with envelope: <code>OP_FALSE OP_IF "ord" ...</code></li>
+                    <li>Data is revealed when spending via script-path (not key-path)</li>
+                    <li>Supports up to ~390KB per inscription (within 400KB standard tx limit)</li>
+                    <li>Content type (MIME) allows various data formats</li>
+                    <li>Inscription requires two transactions: commit (create output) and reveal (spend output)</li>
+                  </ul>
+                  <div className="p-3 bg-yellow-900/30 border border-yellow-700 rounded-xl">
+                    <strong>⚠️ Note:</strong> This is a simplified implementation. Production inscriptions need proper key management and commit/reveal workflow.
+                  </div>
+                </section>
+              </>
             )}
           </>
         )}
