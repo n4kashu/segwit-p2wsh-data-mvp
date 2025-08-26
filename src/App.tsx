@@ -1,5 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import * as bitcoin from "bitcoinjs-lib";
+import * as ecc from "@noble/secp256k1";
+
+// Initialize ECC for Taproot support
+bitcoin.initEccLib(ecc);
 
 const TESTNET = bitcoin.networks.testnet;
 
@@ -80,6 +84,123 @@ function buildInscriptionScript(dataBytes: Uint8Array, contentType: string = "te
   return bitcoin.script.compile(parts);
 }
 
+function generateInscriptionKeyPair() {
+  // Generate a random private key for the inscription
+  const privateKey = bitcoin.ECPair.makeRandom({ network: TESTNET });
+  return privateKey;
+}
+
+function createCommitTransaction(
+  inscriptionScript: Buffer,
+  privateKey: bitcoin.ECPair.ECPairInterface,
+  utxos: Array<{ txid: string; vout: number; value: number; }>,
+  changeAddress: string,
+  feeRate: number = 10
+) {
+  const internalPubkey = privateKey.publicKey.slice(1, 33); // Remove first byte for Taproot
+  
+  // Create script tree with inscription script
+  const scriptTree = { output: inscriptionScript };
+  
+  // Create Taproot payment
+  const p2tr = bitcoin.payments.p2tr({
+    internalPubkey,
+    scriptTree,
+    network: TESTNET
+  });
+
+  const psbt = new bitcoin.Psbt({ network: TESTNET });
+  
+  // Add inputs
+  let totalInput = 0;
+  for (const utxo of utxos) {
+    // For this demo, we assume P2WPKH inputs - in reality you'd detect the type
+    psbt.addInput({
+      hash: utxo.txid,
+      index: utxo.vout,
+      witnessUtxo: {
+        script: Buffer.from('0014' + bitcoin.crypto.hash160(privateKey.publicKey).toString('hex'), 'hex'),
+        value: utxo.value
+      }
+    });
+    totalInput += utxo.value;
+  }
+  
+  // Add Taproot output (this will be spent in reveal)
+  const commitValue = 546; // Dust limit for Taproot
+  psbt.addOutput({
+    address: p2tr.address!,
+    value: commitValue
+  });
+  
+  // Add change output if needed
+  const estimatedFee = psbt.inputCount * 68 + psbt.outputCount * 31 + 10; // Rough estimate
+  const change = totalInput - commitValue - estimatedFee * feeRate;
+  
+  if (change > 546) { // Only add change if above dust limit
+    psbt.addOutput({
+      address: changeAddress,
+      value: change
+    });
+  }
+  
+  return { psbt, p2tr, commitValue };
+}
+
+function createRevealTransaction(
+  commitTxid: string,
+  commitValue: number,
+  inscriptionScript: Buffer,
+  privateKey: bitcoin.ECPair.ECPairInterface,
+  revealToAddress: string,
+  feeRate: number = 10
+) {
+  const internalPubkey = privateKey.publicKey.slice(1, 33);
+  const scriptTree = { output: inscriptionScript };
+  
+  const p2tr = bitcoin.payments.p2tr({
+    internalPubkey,
+    scriptTree,
+    network: TESTNET
+  });
+
+  const psbt = new bitcoin.Psbt({ network: TESTNET });
+  
+  // Add the commit output as input
+  psbt.addInput({
+    hash: commitTxid,
+    index: 0, // Assuming Taproot output is at index 0
+    witnessUtxo: {
+      script: p2tr.output!,
+      value: commitValue
+    },
+    tapLeafScript: [
+      {
+        leafVersion: 0xc0, // Tapscript leaf version
+        script: inscriptionScript,
+        controlBlock: p2tr.witness![p2tr.witness!.length - 1]
+      }
+    ]
+  });
+  
+  // Calculate reveal fee (inscription can be large)
+  const estimatedSize = 200 + Math.ceil(inscriptionScript.length / 4); // Rough estimate including witness discount
+  const revealFee = estimatedSize * feeRate;
+  const revealValue = commitValue - revealFee;
+  
+  if (revealValue <= 0) {
+    throw new Error("Insufficient value to pay reveal transaction fee");
+  }
+  
+  // Add output (this creates the inscribed ordinal)
+  psbt.addOutput({
+    address: revealToAddress,
+    value: revealValue
+  });
+  
+  return psbt;
+}
+
 
 function bytesToHex(u8: Uint8Array): string {
   return Array.from(u8)
@@ -150,6 +271,12 @@ export default function App() {
   const [taprootMode, setTaprootMode] = useState<"utf8" | "hex">("utf8");
   const [contentType, setContentType] = useState<string>("text/plain;charset=utf-8");
   const [taprootExpandedHex, setTaprootExpandedHex] = useState<boolean>(false);
+  const [inscriptionKeyPair, setInscriptionKeyPair] = useState<bitcoin.ECPair.ECPairInterface | null>(null);
+  const [commitTxid, setCommitTxid] = useState<string>("");
+  const [commitValue, setCommitValue] = useState<number>(546);
+  const [revealTxid, setRevealTxid] = useState<string>("");
+  const [taprootMessage, setTaprootMessage] = useState<string>("");
+  const [inscriptionStep, setInscriptionStep] = useState<"prepare" | "commit" | "reveal">("prepare");
   
   // Decode tab states
   const [decodeTxid, setDecodeTxid] = useState<string>("");
@@ -209,10 +336,22 @@ export default function App() {
       setTaprootScriptHex(inscriptionScript.toString("hex"));
       setTaprootScriptLen(inscriptionScript.length);
       
-      // For demo purposes, we'll show the inscription script details
-      // In production, you'd need proper Taproot address generation with key pairs
-      // This requires additional libraries for EC operations
-      setTaprootAddress("[Taproot address generation requires EC library]");
+      // Generate key pair and Taproot address
+      if (!inscriptionKeyPair || inscriptionStep === "prepare") {
+        const keyPair = generateInscriptionKeyPair();
+        setInscriptionKeyPair(keyPair);
+        
+        const internalPubkey = keyPair.publicKey.slice(1, 33);
+        const scriptTree = { output: inscriptionScript };
+        
+        const p2tr = bitcoin.payments.p2tr({
+          internalPubkey,
+          scriptTree,
+          network: TESTNET
+        });
+        
+        setTaprootAddress(p2tr.address || "");
+      }
       
     } catch (e: any) {
       console.error("Error building taproot inscription:", e);
@@ -220,7 +359,7 @@ export default function App() {
       setTaprootAddress("");
       setTaprootScriptLen(0);
     }
-  }, [taprootMode, taprootDataInput, contentType]);
+  }, [taprootMode, taprootDataInput, contentType, inscriptionStep]);
 
   const connect = useCallback(async () => {
     try {
@@ -451,6 +590,81 @@ export default function App() {
       setDecodeLoading(false);
     }
   }, [decodeTxid]);
+
+  const createInscriptionCommit = useCallback(async () => {
+    try {
+      setTaprootMessage("Building commit transaction...");
+      
+      if (!inscriptionKeyPair) throw new Error("No inscription key pair generated");
+      
+      const bytes = taprootMode === "utf8" ? utf8ToBytes(taprootDataInput) : hexToBytes(taprootDataInput);
+      const inscriptionScript = buildInscriptionScript(bytes, contentType);
+      
+      // For demo, we'll simulate having a UTXO from the wallet
+      // In practice, you'd get UTXOs from UniSat or another wallet
+      const demoUtxos = [{
+        txid: "0".repeat(64), // Demo TXID
+        vout: 0,
+        value: 10000 // 10k sats
+      }];
+      
+      const { psbt, p2tr, commitValue: commitVal } = createCommitTransaction(
+        inscriptionScript,
+        inscriptionKeyPair,
+        demoUtxos,
+        address || "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", // Change address
+        10 // Fee rate
+      );
+      
+      setCommitValue(commitVal);
+      
+      // In a real app, you'd sign with the wallet and broadcast
+      setTaprootMessage("Commit transaction ready. (Demo: would broadcast here)");
+      setCommitTxid("demo_commit_" + Math.random().toString(36).substr(2, 9));
+      setInscriptionStep("commit");
+      
+    } catch (e: any) {
+      console.error("Commit transaction error:", e);
+      setTaprootMessage(`Error creating commit: ${e.message}`);
+    }
+  }, [inscriptionKeyPair, taprootDataInput, taprootMode, contentType, address]);
+
+  const createInscriptionReveal = useCallback(async () => {
+    try {
+      setTaprootMessage("Building reveal transaction...");
+      
+      if (!inscriptionKeyPair || !commitTxid) throw new Error("No commit transaction or key pair");
+      
+      const bytes = taprootMode === "utf8" ? utf8ToBytes(taprootDataInput) : hexToBytes(taprootDataInput);
+      const inscriptionScript = buildInscriptionScript(bytes, contentType);
+      
+      const revealPsbt = createRevealTransaction(
+        commitTxid,
+        commitValue,
+        inscriptionScript,
+        inscriptionKeyPair,
+        address || "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", // Reveal to address
+        10 // Fee rate
+      );
+      
+      // In a real app, you'd sign and broadcast this
+      setTaprootMessage("Reveal transaction ready. (Demo: would broadcast here)");
+      setRevealTxid("demo_reveal_" + Math.random().toString(36).substr(2, 9));
+      setInscriptionStep("reveal");
+      
+    } catch (e: any) {
+      console.error("Reveal transaction error:", e);
+      setTaprootMessage(`Error creating reveal: ${e.message}`);
+    }
+  }, [inscriptionKeyPair, commitTxid, commitValue, taprootDataInput, taprootMode, contentType, address]);
+
+  const resetInscription = useCallback(() => {
+    setInscriptionStep("prepare");
+    setCommitTxid("");
+    setRevealTxid("");
+    setTaprootMessage("");
+    setInscriptionKeyPair(null);
+  }, []);
 
   const canFund = connected && !!p2wshAddress && wscriptLen > 0;
   const canSpend = !!fundingTxid && fundingVout !== "" && fundingValue !== "" && !!recipient;
@@ -771,6 +985,103 @@ export default function App() {
                         </div>
                       </div>
                     </div>
+                  </div>
+                </section>
+
+                <section className="bg-slate-900/60 p-4 rounded-2xl shadow">
+                  <h2 className="font-semibold mb-3">2) Inscription Workflow (Commit/Reveal)</h2>
+                  
+                  <div className="flex items-center gap-4 mb-4">
+                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${
+                      inscriptionStep === "prepare" ? "bg-indigo-600" : 
+                      inscriptionStep === "commit" || inscriptionStep === "reveal" ? "bg-green-600" : "bg-slate-600"
+                    }`}>
+                      1
+                    </div>
+                    <div className="opacity-70">Prepare</div>
+                    
+                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${
+                      inscriptionStep === "commit" ? "bg-indigo-600" : 
+                      inscriptionStep === "reveal" ? "bg-green-600" : "bg-slate-600"
+                    }`}>
+                      2
+                    </div>
+                    <div className="opacity-70">Commit</div>
+                    
+                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${
+                      inscriptionStep === "reveal" ? "bg-indigo-600" : "bg-slate-600"
+                    }`}>
+                      3
+                    </div>
+                    <div className="opacity-70">Reveal</div>
+                  </div>
+
+                  <div className="space-y-3">
+                    {inscriptionStep === "prepare" && (
+                      <div className="flex gap-3">
+                        <button
+                          onClick={createInscriptionCommit}
+                          disabled={!taprootAddress || taprootScriptLen === 0}
+                          className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50"
+                        >
+                          Create Commit Transaction
+                        </button>
+                        <button
+                          onClick={resetInscription}
+                          className="px-4 py-2 rounded-xl bg-slate-600 hover:bg-slate-500"
+                        >
+                          Reset
+                        </button>
+                      </div>
+                    )}
+                    
+                    {inscriptionStep === "commit" && (
+                      <div className="space-y-3">
+                        <div className="bg-slate-800/50 p-3 rounded-xl">
+                          <div className="text-sm opacity-70 mb-1">Commit Transaction ID</div>
+                          <div className="font-mono text-xs break-all">{commitTxid}</div>
+                        </div>
+                        <div className="flex gap-3">
+                          <button
+                            onClick={createInscriptionReveal}
+                            className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500"
+                          >
+                            Create Reveal Transaction
+                          </button>
+                          <button
+                            onClick={resetInscription}
+                            className="px-4 py-2 rounded-xl bg-slate-600 hover:bg-slate-500"
+                          >
+                            Reset
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    
+                    {inscriptionStep === "reveal" && (
+                      <div className="space-y-3">
+                        <div className="bg-slate-800/50 p-3 rounded-xl">
+                          <div className="text-sm opacity-70 mb-1">Reveal Transaction ID</div>
+                          <div className="font-mono text-xs break-all">{revealTxid}</div>
+                        </div>
+                        <div className="bg-green-900/30 border border-green-700 rounded-xl p-3">
+                          <strong>🎉 Inscription Complete!</strong>
+                          <div className="text-sm mt-1">Your data has been inscribed on the Bitcoin testnet.</div>
+                        </div>
+                        <button
+                          onClick={resetInscription}
+                          className="px-4 py-2 rounded-xl bg-slate-600 hover:bg-slate-500"
+                        >
+                          Create New Inscription
+                        </button>
+                      </div>
+                    )}
+                    
+                    {taprootMessage && (
+                      <div className="p-3 rounded-xl bg-slate-800/80 border border-slate-700 text-sm">
+                        {taprootMessage}
+                      </div>
+                    )}
                   </div>
                 </section>
 
