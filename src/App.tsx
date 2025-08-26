@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import * as bitcoin from "bitcoinjs-lib";
+import * as tinysecp from "tiny-secp256k1";
 import * as ecc from "@noble/secp256k1";
 
-// Initialize ECC for Taproot support
-bitcoin.initEccLib(ecc);
+// Initialize ECC for bitcoinjs-lib compatibility
+bitcoin.initEccLib(tinysecp);
 
 const TESTNET = bitcoin.networks.testnet;
 
