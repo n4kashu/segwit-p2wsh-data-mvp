@@ -57,17 +57,6 @@ function buildEnvelopeScript(dataBytes: Uint8Array): Buffer {
   ]);
 }
 
-function createP2WSHManually(witnessScript: Buffer, network: any): { address: string; output: Buffer } {
-  // Manually create P2WSH without bitcoinjs-lib size restrictions
-  const witnessScriptHash = bitcoin.crypto.sha256(witnessScript);
-  const scriptPubKey = bitcoin.script.compile([bitcoin.opcodes.OP_0, witnessScriptHash]);
-  const address = bitcoin.address.fromOutputScript(scriptPubKey, network);
-  
-  return {
-    address,
-    output: scriptPubKey
-  };
-}
 
 function bytesToHex(u8: Uint8Array): string {
   return Array.from(u8)
@@ -127,6 +116,7 @@ export default function App() {
   const [building, setBuilding] = useState(false);
   const [broadcasting, setBroadcasting] = useState(false);
   const [message, setMessage] = useState<string>("");
+  const [expandedHex, setExpandedHex] = useState<boolean>(false);
   
   // Decode tab states
   const [decodeTxid, setDecodeTxid] = useState<string>("");
@@ -156,17 +146,15 @@ export default function App() {
       setWscriptHex(wscript.toString("hex"));
       setWscriptLen(wscript.length);
       
-      // Use manual P2WSH creation to bypass bitcoinjs-lib 3600 byte limit
-      if (wscript.length > 3600) {
-        // Manual creation for large scripts
-        const p2wsh = createP2WSHManually(wscript, TESTNET);
-        setP2wshAddress(p2wsh.address);
-        setP2wshScriptPubKeyHex(p2wsh.output.toString("hex"));
-      } else {
-        // Use bitcoinjs-lib for smaller scripts
+      // Only generate address if within 3500 byte limit
+      if (wscript.length <= 3500) {
         const p2wsh = bitcoin.payments.p2wsh({ redeem: { output: wscript }, network: TESTNET });
         setP2wshAddress(p2wsh.address || "");
         setP2wshScriptPubKeyHex((p2wsh.output || Buffer.alloc(0)).toString("hex"));
+      } else {
+        // Clear address for oversized scripts
+        setP2wshAddress("");
+        setP2wshScriptPubKeyHex("");
       }
     } catch (e: any) {
       console.error("Error building witness script:", e);
@@ -205,7 +193,7 @@ export default function App() {
       setMessage("");
       if (!p2wshAddress) throw new Error("P2WSH address not ready");
       if (wscriptLen === 0) throw new Error("Witness script empty");
-      if (wscriptLen > 10000) throw new Error("Script > 10000 bytes — exceeds consensus limit. Reduce data.");
+      if (wscriptLen > 3500) throw new Error("Script > 3500 bytes — exceeds relay policy limit. Please reduce your data.");
       if ((fundAmount || 0) < 400) throw new Error("Fund amount too low; use at least ~400 sats for P2WSH");
       // @ts-ignore
       const unisat = (window as any).unisat;
@@ -259,16 +247,8 @@ export default function App() {
       });
 
       const wscript = Buffer.from(wscriptHex, "hex");
-      
-      // Handle large scripts manually to bypass bitcoinjs-lib limits
-      let lockingScript: Buffer;
-      if (wscript.length > 3600) {
-        const p2wsh = createP2WSHManually(wscript, TESTNET);
-        lockingScript = p2wsh.output;
-      } else {
-        const p2wsh = bitcoin.payments.p2wsh({ redeem: { output: wscript }, network: TESTNET });
-        lockingScript = p2wsh.output!;
-      }
+      const p2wsh = bitcoin.payments.p2wsh({ redeem: { output: wscript }, network: TESTNET });
+      const lockingScript = p2wsh.output!;
 
       console.log("P2WSH details:", {
         scriptPubKey: lockingScript.toString("hex"),
@@ -483,7 +463,7 @@ export default function App() {
                 <div className="space-y-2">
                   <div className="bg-slate-800/70 rounded-xl p-3">
                     <div className="opacity-70">Witness script size</div>
-                    <div className={`${wscriptLen > 10000 ? "text-red-400" : wscriptLen > 3600 ? "text-yellow-400" : ""}`}>{wscriptLen} bytes</div>
+                    <div className={`${wscriptLen > 3500 ? "text-red-400" : ""}`}>{wscriptLen} bytes {wscriptLen > 3500 && "(exceeds limit)"}</div>
                   </div>
                   <div className="bg-slate-800/70 rounded-xl p-3 break-all">
                     <div className="opacity-70">P2WSH address (testnet)</div>
@@ -492,8 +472,22 @@ export default function App() {
                 </div>
                 <div className="space-y-2">
                   <div className="bg-slate-800/70 rounded-xl p-3 break-all">
-                    <div className="opacity-70">witnessScript (hex)</div>
-                    <div className="text-xs">{wscriptHex || "—"}</div>
+                    <div className="flex justify-between items-center mb-1">
+                      <div className="opacity-70">witnessScript (hex)</div>
+                      {wscriptHex && wscriptHex.length > 100 && (
+                        <button 
+                          onClick={() => setExpandedHex(!expandedHex)}
+                          className="text-xs text-indigo-400 hover:text-indigo-300"
+                        >
+                          {expandedHex ? "Collapse" : "Expand"}
+                        </button>
+                      )}
+                    </div>
+                    <div className="text-xs font-mono">
+                      {wscriptHex ? (
+                        expandedHex || wscriptHex.length <= 100 ? wscriptHex : `${wscriptHex.slice(0, 100)}...`
+                      ) : "—"}
+                    </div>
                   </div>
                   <div className="bg-slate-800/70 rounded-xl p-3 break-all">
                     <div className="opacity-70">scriptPubKey for UTXO (hex)</div>
@@ -617,7 +611,7 @@ export default function App() {
             <section className="bg-slate-900/60 p-4 rounded-2xl shadow text-sm space-y-2">
               <h3 className="font-semibold">Notes</h3>
               <ul className="list-disc ml-5 space-y-1">
-                <li>Policy: witnessScript ≤ ~3,600 bytes for broad relay, up to 10,000 bytes consensus max. Larger scripts (3600-10000 bytes) may face relay issues but are valid.</li>
+                <li>Policy: witnessScript limited to 3,500 bytes for reliable network relay and full compliance.</li>
                 <li>Your data lives in the <em>witnessScript</em> under an unexecuted branch. Spending reveals it; no signatures needed for that input.</li>
                 <li>Funding uses <code>unisat.sendBitcoin()</code>. Spending broadcasts with <code>unisat.pushTx()</code>.</li>
                 <li>Everything here runs on <strong>testnet</strong>. Use small amounts (≥~400 sats to avoid dust).</li>

@@ -4,10 +4,11 @@ A web application for storing and retrieving arbitrary data on the Bitcoin testn
 
 ## Features
 
-- **Store Data**: Embed up to 10KB of data in Bitcoin transactions using P2WSH witness scripts
+- **Store Data**: Embed up to 3.5KB of data in Bitcoin transactions using P2WSH witness scripts
 - **Decode Transactions**: Extract and view data from existing P2WSH transactions
 - **UniSat Wallet Integration**: Fund and broadcast transactions using UniSat browser extension
 - **Testnet Support**: Safe testing on Bitcoin testnet
+- **Full Compliance**: Stays within standard relay policy limits for reliable network propagation
 
 ## How It Works
 
@@ -18,9 +19,9 @@ A web application for storing and retrieving arbitrary data on the Bitcoin testn
 
 ## Technical Details
 
-- **Standard Relay**: Scripts up to 3,600 bytes are relayed by most nodes
-- **Consensus Limit**: Scripts up to 10,000 bytes are valid by consensus rules (may require direct pool submission)
+- **Relay Policy Limit**: Scripts limited to 3,500 bytes for reliable network relay
 - **No Signatures**: The envelope pattern allows spending without signatures
+- **Standard Compliance**: All transactions follow standard relay policies for broad network acceptance
 
 ## Setup
 
@@ -41,7 +42,7 @@ npm run dev
 ## Usage
 
 ### Storing Data
-1. Enter your text or hex data (up to 10KB)
+1. Enter your text or hex data (up to 3.5KB)
 2. Connect UniSat wallet
 3. Fund the generated P2WSH address
 4. Spend the UTXO to reveal the data on-chain
@@ -53,9 +54,8 @@ npm run dev
 
 ## Limitations
 
-- Scripts over 3,600 bytes may not relay through standard nodes
-- Maximum script size is 10,000 bytes (Bitcoin consensus rule)
-- Larger scripts may require direct submission to mining pools
+- Maximum script size is 3,500 bytes to ensure reliable network relay
+- Larger payloads must be split into multiple transactions
 
 ## Technologies
 
